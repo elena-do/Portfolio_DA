@@ -1,0 +1,183 @@
+--Create views for countries for the CovidVaccinations table
+Drop View If Exists countries_vax_view;
+Create View countries_vax_view as
+Select *
+From public."CovidVaccinations"
+Where location Not In (Select Distinct continent From public."CovidVaccinations") -- only select countries and exclude continents from location using subquery
+	and location Not In ('World', 'International','European Union')
+	and location Not Like '%income%'
+Order by location;
+
+
+--Create views for countries for the CovidDeaths table
+Drop View If Exists countries_dea_view;
+Create View countries_dea_view as
+Select *
+From public."CovidDeaths"
+Where location Not In (Select Distinct continent From public."CovidVaccinations") -- only select countries and exclude continents from location using subquery
+	and location Not In ('World', 'International','European Union')
+	and location Not Like '%income%'
+Order by location;
+
+
+
+-----------------------------------------------------------------------------
+/* Queries:*/
+
+
+--1. Global Vaccination number (as of 2022-12-09)
+Select  SUM(cast(total_vaccinations as bigint)) as global_vaccinations, 
+		SUM(cast(people_vaccinated as bigint))/SUM(population)*100 as VaccinationPercentage
+From countries_vax_view
+Order by 1,2
+
+--2. Rolling vaccination number for each country
+Select continent, location, date, population, new_vaccinations
+, SUM(CAST(new_vaccinations as int)) OVER (Partition by Location Order by location, Date) as RollingPeopleVaccinated
+From countries_vax_view
+Order by 2,3;
+
+--3. Create new table view for the first 10 countries that recieved covid vaccinations
+--and the dates the countries recieved their first vaccination
+
+Drop View If Exists first_ten_vax;
+Create View first_ten_vax as
+With FirstVax (location, first_vaccination) as
+(
+Select location, min(total_vaccinations) as first_vaccination
+From countries_vax_view
+Group by location
+)
+Select f.location, v.date
+From FirstVax as f
+Inner join countries_vax_view as v
+	On f.location = v.location
+	and f.first_vaccination = v.total_vaccinations
+Order by v.date
+limit 10;
+
+--4. Rate of infection /deaths 100 days before, during, and after vaccination release for the first 10 countries that released a vaccine
+
+Drop View If Exists pre_post_vax;
+Create View pre_post_vax as
+With vax_dates as
+(
+Select f.location, f.date as vaccination_date, f.date- integer '100' as hundred_before, f.date + integer '100' as hundred_after
+From first_ten_vax as f
+)
+
+Select location,
+       unnest(array['vaccination_date', 'hundred_before', 'hundred_after']) AS time_period,
+       unnest(array[vaccination_date, hundred_before, hundred_after]) AS date
+From vax_dates;
+
+Drop View If Exists ppv_death_case;
+Create View ppv_death_case as
+Select ppv.location, ppv. time_period, ppv.date, d.total_cases, d.total_deaths
+From pre_post_vax as ppv
+Left Join countries_dea_view as d
+	on ppv.location = d.location
+	and ppv.date = d.date;
+
+--5. Did the number of cases decrease after the vaccination was released? How large is the difference?
+---Here I am pivoting the table so then I can subtract the columns from one another to find the differences
+
+Create Extension If Not Exists tablefunc;
+
+With ppv_case_diff as
+(
+SELECT *
+FROM crosstab(
+   'SELECT location, time_period, total_cases
+    FROM ppv_death_case
+    ORDER BY 1,2'
+   ) AS ct(location text, vaccination_date_cases int, hundred_after_cases int)
+)
+Select *, hundred_after_cases - vaccination_date_cases as case_diff
+From ppv_case_diff ----* it looks like for all the first 10 countries, there was a decrease in cases
+
+--6. Did the number of deaths decrease after the vaccination was released? How large is the difference?
+With ppv_dea_diff as
+(
+SELECT *
+FROM crosstab(
+   'SELECT location, time_period, total_deaths
+    FROM ppv_death_case
+    ORDER BY 1,2'
+   ) AS ct(location text, vaccination_date_deaths int, hundred_after_deaths int)
+)
+Select *, hundred_after_deaths - vaccination_date_deaths as case_diff
+From ppv_dea_diff ----* same for the deaths
+
+--7. Use rank function to look at top 3 vaccinated countries (by number of people vaccinated) for each continent (as of 2022-12-09)
+With country_max_vax as
+(
+Select continent, location, max(people_vaccinated) as ppl_vax
+From countries_vax_view
+Where people_vaccinated is not null
+Group by continent,location
+Order by 1,2
+),
+country_vax_rank as
+(
+Select continent, location, ppl_vax, Dense_Rank() Over (Partition by Continent Order by ppl_vax DESC) as Rank_V
+From country_max_vax
+Order by continent ASC, ppl_vax DESC
+)
+Select *
+From country_vax_rank
+Where Rank_V <=3
+
+--8. Use rank function to look at top 3 vaccinated countries (by percentage of people vaccinated) for each continent as of the current date (12-9-2022)
+
+With country_max_vax as
+(
+Select continent, location, max(people_vaccinated) as ppl_vax
+From countries_vax_view
+Where people_vaccinated is not null
+Group by continent,location
+Order by 1,2
+),
+country_vax_perc as
+(
+Select m.continent, m.location, m.ppl_vax/v.population*100 as perc_vac
+From country_max_vax as m
+Inner Join countries_vax_view as v
+	on m.ppl_vax = v.people_vaccinated
+	and m.location = v.location
+),
+country_vax_rank as
+(
+Select continent, location, perc_vac, Dense_Rank() Over (Partition by Continent Order by perc_vac DESC) as rank_v
+From country_vax_perc
+Order by continent ASC, perc_vac DESC
+)
+Select distinct location, continent, rank_v, perc_vac
+From country_vax_rank
+Where rank_v <=3
+order by 2,3 
+
+--9. Calculate the percentage of people fully vaccinated for each country
+
+With country_max_vax as
+(
+Select continent, location, max(people_fully_vaccinated) as ppl_vax
+From countries_vax_view
+Where people_fully_vaccinated is not null
+Group by continent,location
+Order by 1,2
+),
+country_vax_perc as
+(
+Select m.continent, m.location, m.ppl_vax/v.population*100 as perc_vac
+From country_max_vax as m
+Inner Join countries_vax_view as v
+	on m.ppl_vax = v.people_fully_vaccinated
+	and m.location = v.location
+)
+Select distinct location, continent, perc_vac
+From country_vax_perc
+
+
+
+
