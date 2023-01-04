@@ -1,0 +1,82 @@
+#Load packages
+library(tidyverse)
+library(ggpubr)
+library(rstatix)
+library(here)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ez)
+library(PANDAS)
+library(lsmeans)
+library(afex)
+
+# Load and inspect the data
+facegendata_raw<- read_csv(here("Data_All_PM_Stim_imotions.csv"))
+
+# Wide format
+set.seed(123)
+facegendata_raw %>% sample_n_by(Gender, Race,Expression, size = 1)
+
+# Gather the columns (within groups) into long format.
+# Convert race,gender,Expression into factor variables
+facegendata <- facegendata_raw %>%
+  gather(key = "Action_Unit", value = "Value", Brow_Furrow:Upper_Lip_Raise ) %>%
+  convert_as_factor(Race, Gender, Expression)
+
+# Inspect some random rows of the data by groups
+set.seed(123)
+facegendata %>% sample_n_by(Gender, Race, Expression, Action_Unit, size = 1)
+
+ #categorize into pain and non-pain data types
+ facegendata<- facegendata %>%
+ mutate(
+   Action_Unit = case_when(
+     str_detect(Action_Unit, "Brow_Furrow") ~ "pain", 
+     str_detect(Action_Unit, "Cheek_Raise") ~ "pain", 
+     str_detect(Action_Unit, "Jaw_Drop") ~ "pain", 
+     str_detect(Action_Unit, "Lip_Stretch") ~ "pain", 
+     str_detect(Action_Unit, "Mouth_Open") ~ "pain", 
+     str_detect(Action_Unit, "Nose_Wrinkle") ~ "pain", 
+     str_detect(Action_Unit, "Upper_Lip_Raise") ~ "pain", 
+     TRUE ~ "non_pain"
+   )
+ ) %>% convert_as_factor(Type, Action_Unit)
+ 
+ #summary stats
+ summarystats<- facegendata %>%
+   group_by(Gender, Race, Action_Unit ) %>%
+   get_summary_stats(Value, type = "mean_sd")
+ 
+ 
+ #reformate data for plot of averages for action units
+summarystats_plot <- summarystats %>%
+   unite(Demographic, c(Gender, Race))%>%
+   convert_as_factor(Demographic)
+
+summarystats_plot$Demographic <- c("bf","bf","wf","wf", "bm","bm","wm","wm")
+summarystats_plot <- summarystats_plot %>%
+  convert_as_factor(Demographic)
+
+
+ #Clean and reformat date for ANOVA analysis
+ 
+ summary_facegendata_raw<-facegendata
+ summary_facegendata_raw<-subset(summary_facegendata_raw, select = -c(Type) )
+ summary_facegendata_raw<- summary_facegendata_raw%>%
+   group_by(Gender, Race, Expression, Action_Unit ) %>%
+   get_summary_stats(Value, type = "mean")
+ summary_facegendata_raw<-subset(summary_facegendata_raw, select = -c(n,variable) )
+ summary_facegendata_raw<-tidyr::spread(summary_facegendata_raw,key = Action_Unit,value=mean) 
+ summary_facegendata_raw<- dplyr::mutate(summary_facegendata_raw, ID = row_number())
+ summary_facegendata_raw<-convert_as_factor(summary_facegendata_raw, ID)
+ 
+ summary_facegendata_raw <- summary_facegendata_raw %>%
+   gather(key = "Action_Unit", value = "Value", Brow_Furrow:Upper_Lip_Raise) %>%
+   convert_as_factor(Race, Gender, Expression, Action_Unit)
+ 
+ 
+ #ANOVA
+ res.aov <- anova_test(data =  summary_facegendata_raw, dv = Value, wid=ID,between = c(Gender,Race), within = c(Action_Unit))
+ get_anova_table(res.aov)
+ 
