@@ -1,3 +1,4 @@
 # Portfolio_DA
 
-![Poster](/images/Poster_day.png)
+![Poster](Poster_day.png)
+
